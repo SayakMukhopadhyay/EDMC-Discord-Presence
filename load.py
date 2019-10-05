@@ -136,16 +136,42 @@ Discord_Initialize(CLIENT_ID, event_handlers, True, None)
 
 this = sys.modules[__name__]	# For holding module globals
 
-this.presence_state = 'Connecting CMDR Interface'
-this.presence_details = ''
+this.game_mode = None
+this.in_wing = False
+this.in_crew = False
+this.crew_captain = None
+
+this.presence_details = 'Connecting CMDR Interface'
+this.presence_party_size = -1
+this.presence_party_max = -1
+# TODO: read time from entry['timestamp']
+# TODO: figure out a better place to set time_start
 this.time_start = time.time()
+this.presence_time_end = None
 
 def update_presence():
     presence = DiscordRichPresence()
-    if config.getint("disable_presence")==0:
-        presence.state = this.presence_state
+    if config.getint("disable_presence") == 0:
         presence.details = this.presence_details
+        if this.in_wing:
+            presence.state = 'In wing in %s' % this.game_mode
+            this.presence_party_max = 4
+        elif this.in_crew:
+            if this.crew_captain is True:
+                presence.state = 'Commanding crew in %s' % this.game_mode
+            elif this.crew_captain is None:
+                presence.state = 'In crew in %s' % this.game_mode
+            else:
+                presence.state = 'In %s crew in %s' % (posessivify(this.crew_captain), this.game_mode)
+        elif this.game_mode is not None:
+            presence.state = 'Playing in %s' % this.game_mode
+        if this.presence_party_size > 0:
+            presence.partySize = this.presence_party_size
+            if this.presence_party_max > 0:
+                presence.partyMax = this.presence_party_max
     presence.startTimestamp = int(this.time_start)
+    if this.presence_time_end:
+        presence.endTimestamp = this.presence_time_end
     Discord_UpdatePresence(presence)
 
 this.disablePresence = None
@@ -179,45 +205,100 @@ def plugin_stop():
 
 
 def journal_entry(cmdr, is_beta, system, station, entry, state):
+    # GAME EVENTS
+    # TODO: is StartUp even a real event?
     if entry['event'] == 'StartUp':
-        this.presence_state = 'In %s' % system
         if station is None:
-            this.presence_details = 'Flying in normal space'
+            this.presence_details = 'Flying in %s' % system
         else:
-            this.presence_details = 'Docked at %s' % station
-    elif entry['event'] == 'Location':
-        this.presence_state = 'In %s' % system
-        if station is None:
-            this.presence_details = 'Flying in normal space'
-        else:
-            this.presence_details = 'Docked at %s' % station
+            this.presence_details = 'Docked at %s in %s' % (entry['StationName'], system)
+    elif entry['event'] == 'LoadGame':
+        this.game_mode = entry['GameMode']
+    elif entry['event'] == 'ShutDown':
+        # TODO: read time from entry['timestamp']
+        this.presence_time_end = time.time()
+        this.presence_details = 'Shutdown'
+    elif entry['event'] == 'Music':
+        if entry['MusicTrack'] == 'MainMenu':
+            # TODO: read time from entry['timestamp']
+            this.presence_time_end = time.time()
+            this.presence_details = 'In main menu'
+    elif entry['event'] == 'Location' and station is None:
+        this.presence_details = 'Flying in %s' % system
+    # SUPERCRUISE EVENTS
     elif entry['event'] == 'StartJump':
-        this.presence_state = 'Jumping'
         if entry['JumpType'] == 'Hyperspace':
             this.presence_details = 'Jumping to %s' % entry['StarSystem']
         elif entry['JumpType'] == 'Supercruise':
-            this.presence_details = 'Preparing for supercruise'
-    elif entry['event'] == 'SupercruiseEntry':
-        this.presence_state = 'In %s' % system
-        this.presence_details = 'Supercruising'
+            this.presence_details = 'Supercruising around %s' % system
+    elif entry['event'] == 'SupercruiseEntry' or entry['event'] == 'FSDJump':
+        this.presence_details = 'Supercruising around %s' % system
     elif entry['event'] == 'SupercruiseExit':
-        this.presence_state = 'In %s' % system
-        this.presence_details = 'Flying in normal space'
-    elif entry['event'] == 'FSDJump':
-        this.presence_state = 'In %s' % system
-        this.presence_details = 'Supercruising'
+        nearest_body = station or entry['Body']
+        this.presence_details = 'Flying around %s in %s' % (nearest_body, system)
+    # STATION EVENTS
+    elif entry['event'] == 'Location' and station is not None:
+        this.presence_details = 'Docked at %s in %s' % (station, system)
+    elif entry['event'] == 'DockingGranted':
+        this.presence_details = 'Docking at %s in %s' % (entry['StationName'], system)
+    elif entry['event'] == 'ApproachSettlement':
+        this.presence_details = 'Approaching settlement on %s in %s' % (entry['BodyName'], system)
     elif entry['event'] == 'Docked':
-        this.presence_state = 'In %s' % system
-        this.presence_details = 'Docked at %s' % station
-    elif entry['event'] == 'Undocked':
-        this.presence_state = 'In %s' % system
-        this.presence_details = 'Flying in normal space'
-    elif entry['event'] == 'ShutDown':
-        this.presence_state = 'Connecting CMDR Interface'
-        this.presence_details = ''
-    elif entry['event'] == 'Music':
-        if entry['MusicTrack'] == 'MainMenu':
-            this.presence_state = 'Connecting CMDR Interface'
-            this.presence_details = ''
+        this.presence_details = 'Docked at %s in %s' % (entry['StationName'], system)
+    elif entry['event'] == 'Undocked' or entry['event'] == 'DockingCancelled' or entry['event'] == 'DockingTimeout':
+        this.presence_details = 'Flying at %s in %s' % (entry['StationName'], system)
+    # Planetary events
+    elif entry['event'] == 'ApproachBody':
+        this.presence_details = 'Approaching %s in %s' % (entry['Body'], system)
+    elif entry['event'] == 'Touchdown' and entry['PlayerControlled']:
+        # TODO: get planet's name
+        this.presence_details = 'Landed on planet in %s' % system
+    elif entry['event'] == 'Liftoff' and entry['PlayerControlled']:
+        # TODO: get planet's name
+        this.presence_details = 'Flying around %s' % system
+    elif entry['event'] == 'LeaveBody':
+        this.presence_details = 'Supercruising around %s' % system
+    # EXTERNAL VEHICLE EVENTS
+    elif entry['event'] == 'LaunchFighter' and entry['PlayerControlled']:
+        this.presence_details = 'Flying fighter in %s' % system
+    elif entry['event'] == 'DockFighter':
+        this.presence_details = 'Flying in %s' % system
+    elif entry['event'] == 'DockSRV':
+        # TODO: figure out how to get planet's name
+        this.presence_details = 'Landed on planet in %s' % system
+    # WING EVENTS
+    elif entry['event'] == 'WingJoin':
+        this.in_wing = True
+        this.presence_party_size = len(entry['Others']) + 1
+    elif entry['event'] == 'WingAdd':
+        this.in_wing = True
+        if this.presence_party_size <= 0:
+            this.presence_party_size = 1
+        this.presence_party_size += 1
+    elif entry['event'] == 'WingLeave':
+        this.in_wing = False
+        this.presence_party_size = -1
+    # CREW EVENTS
+    elif entry['event'] == 'JoinACrew':
+        this.in_crew = True
+        this.presence_party_size = 2
+        this.crew_captain = entry['Captain']
+    elif entry['event'] == 'CrewMemberJoins':
+        this.in_crew = True
+        this.presence_party_size += 1
+        # TODO: does this event only fire when you're captain?
+        this.crew_captain = True
+    elif entry['event'] == 'ChangeCrewRole':
+        this.in_crew = True
+    elif entry['event'] == 'CrewMemberQuits' or entry['event'] == 'KickCrewMember':
+        this.in_crew = True
+        this.presence_party_size -= 1
+    elif entry['event'] == 'QuitACrew' or entry['event'] == 'EndCrewSession':
+        this.in_crew = False
+        this.presence_party_size = -1
+        this.crew_captain = None
+
     update_presence()
             
+def posessivify(str):
+    return str.last == 's' if "%s'" % str else "%s's" % str
